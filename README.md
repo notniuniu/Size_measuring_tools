@@ -9,7 +9,8 @@ Size_measuring_tools/
 │   ├── Depth_map_renderin.py     # 深度图渲染模块
 │   ├── ICP_registration.py       # 点云配准模块
 │   ├── adaptive_downsample.py    # 自适应降采样模块
-│   └── pointcloud_denoise.py     # 点云去噪模块
+│   ├── pointcloud_denoise.py     # 点云去噪模块
+│   └── Data_verification.py      # 点云数据验证与校准模块
 ├── 点云分割/
 │   └── extract_plane.py          # 平面提取模块
 └── README.md                     # 项目说明文档
@@ -93,6 +94,17 @@ Size_measuring_tools/
 | `ransac_plane_extraction()` | 使用RANSAC方法提取平面 |
 | `region_growing_plane_extraction()` | 使用区域增长方法提取平面 |
 | `extract_plane()` | 面提取主函数 |
+
+### Data_verification.py
+
+| 函数名 | 功能描述 |
+|-------|---------|
+| `verify_pointcloud_in_bbox()` | 验证点云是否在预定包围盒内 |
+| `calculate_bbox()` | 计算点云的包围盒 |
+| `estimate_geometric_center()` | 使用核密度估计计算点云几何中心 |
+| `estimate_geometric_center_3d()` | 使用3D核密度估计计算点云几何中心 |
+| `calibrate_pointcloud()` | 强制校准点云到目标包围盒 |
+| `verify_and_calibrate()` | 验证点云并在必要时进行校准 |
 
 ## 依赖项
 - Python 3.6+
