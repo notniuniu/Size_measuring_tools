@@ -7,7 +7,9 @@ Size_measuring_tools/
 ├── 点云预处理/
 │   ├── PointCloud_DataLoader.py  # 核心点云处理模块
 │   ├── Depth_map_renderin.py     # 深度图渲染模块
-│   └── ICP_registration.py       # 点云配准模块
+│   ├── ICP_registration.py       # 点云配准模块
+│   ├── adaptive_downsample.py    # 自适应降采样模块
+│   └── pointcloud_denoise.py     # 点云去噪模块
 └── README.md                     # 项目说明文档
 ```
 
@@ -55,6 +57,38 @@ Size_measuring_tools/
 | `create_transform_matrix()` | 创建4×4变换矩阵 |
 | `decompose_transform()` | 分解变换矩阵为旋转和平移 |
 | `merge_registered_pointclouds()` | 合并配准后的点云 |
+
+### adaptive_downsample.py
+
+| 函数名 | 功能描述 |
+|-------|---------|
+| `setup_logger()` | 配置日志记录器 |
+| `get_logger()` | 获取全局日志器 |
+| `set_logger()` | 设置自定义日志器 |
+| `compute_bounding_box()` | 计算点云包围盒信息 |
+| `estimate_point_density()` | 估计点云密度（点数/体积） |
+| `compute_adaptive_voxel_size()` | 根据点数规模自适应计算体素尺寸 |
+| `adaptive_voxel_downsample()` | 核心自适应体素降采样函数 |
+| `batch_adaptive_downsample()` | 批量自适应降采样 |
+| `uniform_downsample()` | 均匀降采样（每隔k个点取一个） |
+| `random_downsample()` | 随机降采样 |
+| `farthest_point_downsample()` | 最远点采样（FPS） |
+| `evaluate_downsample_quality()` | 评估降采样质量 |
+
+### pointcloud_denoise.py
+
+| 函数名 | 功能描述 |
+|-------|---------|
+| `setup_logger()` | 配置日志记录器 |
+| `get_logger()` | 获取全局日志器 |
+| `set_logger()` | 设置自定义日志器 |
+| `dbscan_denoise()` | 基于DBSCAN密度聚类的点云去噪 |
+| `statistical_denoise()` | 统计滤波去噪 |
+| `radius_denoise()` | 半径滤波去噪 |
+| `pipeline_denoise()` | 组合去噪流水线 |
+| `estimate_dbscan_params()` | 自适应估计DBSCAN参数 |
+| `batch_denoise()` | 批量点云去噪 |
+| `evaluate_denoise_quality()` | 评估去噪质量 |
 
 ## 依赖项
 - Python 3.6+
