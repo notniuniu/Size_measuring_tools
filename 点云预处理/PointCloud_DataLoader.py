@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-点云加载工具模块 (Pointcloud Loading Utilities)
-支持格式: PLY, PCD, TXT(ASCII/Binary), XYZ, BIN
-输出格式: Open3D PointCloud
-功能: 加载、降采样、可视化、日志记录
+基于点云投影的深度图渲染模块 (Depth Map Rendering from Point Cloud Projection)
+
+核心算法：
+1. 点云→深度图投影（近距离优先策略处理遮挡）
+2. 改进Otsu阈值算法（直方图修剪+阈值细化）自动分割前景背景
+3. 差异化着色：前景JET映射+CLAHE增强，背景黑灰渐变
+
+输出：彩色深度图(.png) + 原始深度数据(.npy)
 """
 
 import os
-import struct
 import logging
 import numpy as np
-import open3d as o3d
-from pathlib import Path
+import cv2
 from datetime import datetime
-from typing import Optional, Tuple, Union
+from typing import Tuple, Optional
+
 
 # ============================================================================
-# 日志配置
+# 日志配置（与pointcloud_loading.py共用）
 # ============================================================================
+
+_logger: Optional[logging.Logger] = None
+
 
 def setup_logger(
     log_dir: str = "./logs",
     log_level: int = logging.INFO,
-    console_output: bool = True
+    console_output: bool = False
 ) -> logging.Logger:
     """
     配置日志记录器
@@ -32,32 +38,25 @@ def setup_logger(
         log_dir: 日志文件目录
         log_level: 日志级别
         console_output: 是否输出到控制台
-    
-    Returns:
-        配置好的Logger对象
     """
     os.makedirs(log_dir, exist_ok=True)
     
-    # 日志文件名包含时间戳
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"pointcloud_{timestamp}.log")
+    log_file = os.path.join(log_dir, f"depth_render_{timestamp}.log")
     
-    logger = logging.getLogger("PointCloudLoader")
+    logger = logging.getLogger("DepthMapRenderer")
     logger.setLevel(log_level)
     logger.handlers.clear()
     
-    # 日志格式
     formatter = logging.Formatter(
         "[%(asctime)s] %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     
-    # 文件处理器
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     
-    # 控制台处理器
     if console_output:
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
@@ -66,15 +65,14 @@ def setup_logger(
     logger.info(f"日志文件: {log_file}")
     return logger
 
-# 默认日志器
-_logger: Optional[logging.Logger] = None
 
 def get_logger() -> logging.Logger:
-    """获取全局日志器，未初始化则自动创建"""
+    """获取全局日志器"""
     global _logger
     if _logger is None:
         _logger = setup_logger()
     return _logger
+
 
 def set_logger(logger: logging.Logger):
     """设置自定义日志器"""
@@ -83,610 +81,340 @@ def set_logger(logger: logging.Logger):
 
 
 # ============================================================================
-# 核心加载函数
+# 核心函数：深度图生成
 # ============================================================================
 
-def load_pointcloud(
-    file_path: str,
-    file_format: Optional[str] = None,
-    binary_record_format: str = '3fi',
-    skip_header: int = 0,
-    delimiter: str = None,
-    xyz_columns: Tuple[int, int, int] = (0, 1, 2)
-) -> o3d.geometry.PointCloud:
+def generate_depth_map(
+    points: np.ndarray,
+    resolution: float = 1.0,
+    output_file: Optional[str] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    统一点云加载接口，自动识别格式
+    从点云数据生成深度图
+    
+    原理：将点云投影到xy平面，z值作为深度
+    遮挡处理：同一像素位置保留最小z值（近距离优先）
     
     Args:
-        file_path: 文件路径
-        file_format: 强制指定格式 ('ply','pcd','txt','txt_bin','xyz','bin')，None则自动检测
-        binary_record_format: 二进制TXT的struct格式，默认'3fi'(3个float+1个int)
-        skip_header: TXT文件跳过的头部行数
-        delimiter: TXT分隔符，None则自动检测
-        xyz_columns: TXT中xyz对应的列索引
+        points: n×3 numpy数组 [x, y, z]
+        resolution: 分辨率（单位长度对应像素数）
+        output_file: 输出路径（可选）
     
     Returns:
-        Open3D PointCloud对象
+        (depth_map, depth_image_colored): 原始深度图 和 彩色可视化图
     """
     logger = get_logger()
     
-    if not os.path.exists(file_path):
-        logger.error(f"文件不存在: {file_path}")
-        raise FileNotFoundError(f"文件不存在: {file_path}")
+    # 数据验证
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError("点云数据必须是n×3的数组")
     
-    file_size = os.path.getsize(file_path) / 1024 / 1024
-    logger.info(f"加载文件: {file_path} ({file_size:.2f} MB)")
+    logger.info(f"生成深度图: {len(points)} 点, 分辨率={resolution}")
     
-    # 自动检测格式
-    if file_format is None:
-        file_format = _detect_format(file_path)
-    file_format = file_format.lower()
-    logger.info(f"文件格式: {file_format}")
+    x_coords, y_coords, z_coords = points[:, 0], points[:, 1], points[:, 2]
     
-    # 根据格式调用对应加载函数
-    loaders = {
-        'ply': lambda: _load_ply(file_path),
-        'pcd': lambda: _load_pcd(file_path),
-        'xyz': lambda: _load_txt_ascii(file_path, skip_header, delimiter, xyz_columns),
-        'txt': lambda: _load_txt_ascii(file_path, skip_header, delimiter, xyz_columns),
-        'txt_bin': lambda: _load_txt_binary(file_path, binary_record_format),
-        'bin': lambda: _load_txt_binary(file_path, binary_record_format),
+    x_min, x_max = x_coords.min(), x_coords.max()
+    y_min, y_max = y_coords.min(), y_coords.max()
+    
+    width = int((x_max - x_min) * resolution + 1)
+    height = int((y_max - y_min) * resolution + 1)
+    
+    logger.info(f"尺寸: {width}×{height} px")
+    logger.info(f"X:[{x_min:.4f},{x_max:.4f}] Y:[{y_min:.4f},{y_max:.4f}] Z:[{z_coords.min():.4f},{z_coords.max():.4f}]")
+    
+    # 点云投影
+    depth_map = _project_points_to_depth(points, x_min, y_min, resolution, width, height)
+    
+    # 着色
+    depth_image_colored = _colorize_depth_map(depth_map)
+    
+    # 保存
+    if output_file:
+        _save_depth_outputs(depth_map, depth_image_colored, output_file)
+        print(f"深度图已保存: {output_file}")
+    
+    logger.info("深度图生成完成")
+    return depth_map, depth_image_colored
+
+
+def _project_points_to_depth(
+    points: np.ndarray,
+    x_min: float,
+    y_min: float,
+    resolution: float,
+    width: int,
+    height: int
+) -> np.ndarray:
+    """点云投影到深度图（近距离优先）"""
+    logger = get_logger()
+    
+    depth_map = np.full((height, width), np.inf, dtype=np.float32)
+    
+    px = ((points[:, 0] - x_min) * resolution).astype(np.int32)
+    py = ((points[:, 1] - y_min) * resolution).astype(np.int32)
+    z = points[:, 2]
+    
+    valid = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+    px, py, z = px[valid], py[valid], z[valid]
+    
+    logger.debug(f"有效投影点: {len(px)}/{len(points)}")
+    
+    # 按z排序（大→小），小z后写入覆盖大z
+    sort_idx = np.argsort(-z)
+    px, py, z = px[sort_idx], py[sort_idx], z[sort_idx]
+    
+    depth_map[py, px] = z
+    depth_map[depth_map == np.inf] = np.nan
+    
+    valid_count = np.sum(~np.isnan(depth_map))
+    logger.info(f"投影完成: 有效像素={valid_count}, 覆盖率={100*valid_count/(width*height):.1f}%")
+    
+    return depth_map
+
+
+# ============================================================================
+# 改进Otsu阈值算法
+# ============================================================================
+
+def otsu_threshold_improved(values: np.ndarray, num_bins: int = 256) -> float:
+    """
+    改进Otsu阈值算法
+    
+    改进：1.直方图修剪去噪 2.阈值细化（方差相近选中心）
+    """
+    logger = get_logger()
+    
+    if len(values) == 0:
+        return 0.0
+    
+    hist, bin_edges = np.histogram(values, bins=num_bins)
+    
+    # 直方图修剪
+    non_zero = np.where(hist > 0)[0]
+    if len(non_zero) == 0:
+        return np.median(values)
+    
+    start_idx, end_idx = non_zero[0], non_zero[-1]
+    trimmed_hist = hist[start_idx:end_idx + 1]
+    
+    logger.debug(f"Otsu修剪: bins [{start_idx},{end_idx}]")
+    
+    if len(trimmed_hist) <= 1:
+        return np.median(values)
+    
+    total = trimmed_hist.sum()
+    if total == 0:
+        return np.median(values)
+    
+    level_indices = np.arange(len(trimmed_hist))
+    global_mean = np.dot(level_indices, trimmed_hist) / total
+    
+    max_variance = 0.0
+    best_idx = 0
+    cumulative_sum = 0.0
+    cumulative_mean = 0.0
+    
+    for i in range(len(trimmed_hist)):
+        cumulative_sum += trimmed_hist[i]
+        cumulative_mean += i * trimmed_hist[i]
+        
+        w0, w1 = cumulative_sum / total, 1.0 - cumulative_sum / total
+        
+        if w0 <= 0 or w1 <= 0:
+            continue
+        
+        mu0 = cumulative_mean / cumulative_sum
+        mu1 = (global_mean * total - cumulative_mean) / (total - cumulative_sum)
+        
+        variance = w0 * w1 * (mu0 - mu1) ** 2
+        
+        center = len(trimmed_hist) / 2
+        if variance > max_variance or \
+           (np.isclose(variance, max_variance, rtol=1e-6) and abs(i - center) < abs(best_idx - center)):
+            max_variance = variance
+            best_idx = i
+    
+    threshold = bin_edges[start_idx + best_idx]
+    logger.info(f"Otsu阈值: {threshold:.4f}, 方差: {max_variance:.4f}")
+    
+    return threshold
+
+
+# ============================================================================
+# 深度图着色
+# ============================================================================
+
+def _colorize_depth_map(depth_map: np.ndarray) -> np.ndarray:
+    """深度图着色：前景JET+CLAHE，背景黑灰渐变"""
+    logger = get_logger()
+    
+    valid_mask = ~np.isnan(depth_map)
+    
+    if not np.any(valid_mask):
+        logger.warning("深度图无有效数据")
+        return np.zeros((*depth_map.shape, 3), dtype=np.uint8)
+    
+    valid_depths = depth_map[valid_mask]
+    
+    depth_min = np.percentile(valid_depths, 1)
+    depth_max = np.percentile(valid_depths, 99)
+    
+    logger.debug(f"深度范围(1%-99%): [{depth_min:.4f}, {depth_max:.4f}]")
+    
+    # Otsu分割
+    otsu_thresh = otsu_threshold_improved(valid_depths[valid_depths >= depth_min], 256)
+    p85 = np.percentile(valid_depths, 85)
+    fg_upper = min(otsu_thresh, p85)
+    
+    logger.info(f"分割阈值: Otsu={otsu_thresh:.4f}, P85={p85:.4f}, 使用={fg_upper:.4f}")
+    
+    # 掩码
+    fg_mask = (depth_map <= fg_upper) & valid_mask
+    bg_mask = valid_mask & ~fg_mask
+    
+    logger.info(f"前景占比: {100*np.sum(fg_mask)/np.sum(valid_mask):.1f}%")
+    
+    colored = np.zeros((*depth_map.shape, 3), dtype=np.uint8)
+    
+    # 前景: JET + γ校正 + CLAHE
+    if np.any(fg_mask):
+        fg_norm = np.clip(depth_map[fg_mask], depth_min, fg_upper)
+        fg_norm = (fg_norm - depth_min) / (fg_upper - depth_min + 1e-8)
+        fg_gamma = np.power(fg_norm, 0.7)
+        
+        fg_8bit = np.zeros_like(depth_map, dtype=np.uint8)
+        fg_8bit[fg_mask] = (255 * fg_gamma).astype(np.uint8)
+        
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        fg_enhanced = clahe.apply(fg_8bit)
+        fg_colored = cv2.applyColorMap(fg_enhanced, cv2.COLORMAP_JET)
+        colored[fg_mask] = fg_colored[fg_mask]
+    
+    # 背景: 黑灰渐变
+    if np.any(bg_mask):
+        bg_norm = np.clip(depth_map[bg_mask], fg_upper, depth_max)
+        bg_norm = (bg_norm - fg_upper) / (depth_max - fg_upper + 1e-8)
+        bg_gray = (30 + 50 * bg_norm).astype(np.uint8)
+        
+        colored[bg_mask, 0] = bg_gray
+        colored[bg_mask, 1] = bg_gray
+        colored[bg_mask, 2] = bg_gray
+    
+    return colored
+
+
+# ============================================================================
+# 输出保存
+# ============================================================================
+
+def _save_depth_outputs(depth_map: np.ndarray, colored: np.ndarray, output_file: str):
+    """保存深度图"""
+    logger = get_logger()
+    
+    os.makedirs(os.path.dirname(output_file) or '.', exist_ok=True)
+    
+    cv2.imwrite(output_file, colored)
+    logger.info(f"彩色图保存: {output_file}")
+    
+    npy_file = os.path.splitext(output_file)[0] + '_depth.npy'
+    np.save(npy_file, depth_map)
+    logger.info(f"深度数据保存: {npy_file}")
+
+
+# ============================================================================
+# 辅助函数
+# ============================================================================
+
+def depth_map_to_pointcloud(
+    depth_map: np.ndarray,
+    resolution: float = 1.0,
+    x_offset: float = 0.0,
+    y_offset: float = 0.0
+) -> np.ndarray:
+    """深度图逆变换回点云"""
+    valid_mask = ~np.isnan(depth_map)
+    py, px = np.where(valid_mask)
+    z = depth_map[valid_mask]
+    
+    x = px / resolution + x_offset
+    y = py / resolution + y_offset
+    
+    return np.column_stack([x, y, z])
+
+
+def compute_depth_statistics(depth_map: np.ndarray) -> dict:
+    """计算深度图统计信息"""
+    logger = get_logger()
+    
+    valid_mask = ~np.isnan(depth_map)
+    valid_depths = depth_map[valid_mask]
+    
+    if len(valid_depths) == 0:
+        return {'valid_pixels': 0}
+    
+    stats = {
+        'valid_pixels': int(np.sum(valid_mask)),
+        'total_pixels': depth_map.size,
+        'coverage': float(np.sum(valid_mask) / depth_map.size),
+        'min': float(valid_depths.min()),
+        'max': float(valid_depths.max()),
+        'mean': float(valid_depths.mean()),
+        'std': float(valid_depths.std()),
+        'median': float(np.median(valid_depths)),
     }
     
-    if file_format not in loaders:
-        logger.error(f"不支持的格式: {file_format}")
-        raise ValueError(f"不支持的格式: {file_format}，支持: {list(loaders.keys())}")
-    
-    pcd = loaders[file_format]()
-    logger.info(f"加载完成: {len(pcd.points)} 个点")
-    log_pointcloud_stats(pcd)
-    
-    return pcd
+    logger.debug(f"统计: min={stats['min']:.4f}, max={stats['max']:.4f}, mean={stats['mean']:.4f}")
+    return stats
 
 
-def _detect_format(file_path: str) -> str:
-    """根据扩展名和内容检测文件格式"""
-    ext = Path(file_path).suffix.lower()
-    
-    if ext in ['.ply']:
-        return 'ply'
-    elif ext in ['.pcd']:
-        return 'pcd'
-    elif ext in ['.xyz']:
-        return 'xyz'
-    elif ext in ['.bin']:
-        return 'bin'
-    elif ext in ['.txt', '']:
-        # 检测txt是否为二进制
-        return 'txt_bin' if _is_binary_file(file_path) else 'txt'
-    else:
-        return 'txt'  # 默认当作ASCII txt处理
-
-
-def _is_binary_file(file_path: str, check_bytes: int = 8192) -> bool:
-    """检测文件是否为二进制格式"""
-    try:
-        with open(file_path, 'rb') as f:
-            chunk = f.read(check_bytes)
-        # 二进制文件通常包含空字节
-        return b'\x00' in chunk
-    except:
-        return False
-
-
-# ============================================================================
-# 各格式加载实现
-# ============================================================================
-
-def _load_ply(file_path: str) -> o3d.geometry.PointCloud:
-    """加载PLY格式"""
-    return o3d.io.read_point_cloud(file_path)
-
-
-def _load_pcd(file_path: str) -> o3d.geometry.PointCloud:
-    """加载PCD格式"""
-    return o3d.io.read_point_cloud(file_path)
-
-
-def _load_txt_ascii(
-    file_path: str,
-    skip_header: int = 0,
-    delimiter: str = None,
-    xyz_columns: Tuple[int, int, int] = (0, 1, 2)
-) -> o3d.geometry.PointCloud:
-    """
-    加载ASCII格式的TXT/XYZ点云
-    
-    支持格式示例:
-        x y z
-        x,y,z
-        x y z r g b
-    """
+def batch_generate_depth_maps(
+    input_files: list,
+    output_dir: str,
+    resolution: float = 1.0,
+    load_func=None
+) -> list:
+    """批量生成深度图"""
     logger = get_logger()
     
-    try:
-        # 自动检测分隔符
-        if delimiter is None:
-            with open(file_path, 'r') as f:
-                for _ in range(skip_header):
-                    f.readline()
-                first_line = f.readline().strip()
-            delimiter = ',' if ',' in first_line else None  # None表示空白符
-        
-        # 加载数据
-        data = np.loadtxt(
-            file_path,
-            delimiter=delimiter,
-            skiprows=skip_header,
-            dtype=np.float64
-        )
-        
-        if data.ndim == 1:
-            data = data.reshape(1, -1)
-        
-        # 提取XYZ
-        x_col, y_col, z_col = xyz_columns
-        points = data[:, [x_col, y_col, z_col]]
-        
-        # 过滤无效点
-        valid_mask = ~np.any(np.isnan(points) | np.isinf(points), axis=1)
-        points = points[valid_mask]
-        
-        if np.sum(~valid_mask) > 0:
-            logger.warning(f"过滤无效点: {np.sum(~valid_mask)} 个")
-        
-        # 转换为Open3D格式
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        
-        return pcd
-        
-    except Exception as e:
-        logger.error(f"加载TXT失败: {e}")
-        raise
-
-
-def _load_txt_binary(
-    file_path: str,
-    record_format: str = '3fi'
-) -> o3d.geometry.PointCloud:
-    """
-    加载二进制格式的点云文件
+    os.makedirs(output_dir, exist_ok=True)
+    if load_func is None:
+        load_func = np.loadtxt
     
-    Args:
-        file_path: 文件路径
-        record_format: struct格式字符串
-            '3f'  - 仅xyz (12字节)
-            '3fi' - xyz + int (16字节)
-            '6f'  - xyz + rgb (24字节)
-    """
-    logger = get_logger()
+    output_files = []
+    total = len(input_files)
     
-    try:
-        record_size = struct.calcsize(record_format)
-        file_size = os.path.getsize(file_path)
-        total_records = file_size // record_size
-        
-        if file_size % record_size != 0:
-            logger.warning(f"文件大小非整数倍，尾部 {file_size % record_size} 字节被忽略")
-        
-        if total_records == 0:
-            logger.error("无有效记录")
-            return o3d.geometry.PointCloud()
-        
-        # 构建numpy dtype
-        dtype_map = {
-            '3f': [('x', 'f4'), ('y', 'f4'), ('z', 'f4')],
-            '3fi': [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('_', 'i4')],
-            '6f': [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('r', 'f4'), ('g', 'f4'), ('b', 'f4')],
-            '3fI': [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), ('_', 'u4')],
-        }
-        
-        if record_format in dtype_map:
-            dtype = np.dtype(dtype_map[record_format]).newbyteorder('<')
-        else:
-            # 通用解析：假设前3个float为xyz
-            logger.warning(f"非标准格式 {record_format}，仅提取前3个float作为xyz")
-            with open(file_path, 'rb') as f:
-                raw_data = f.read()
-            
-            points = []
-            for i in range(total_records):
-                offset = i * record_size
-                record = struct.unpack(record_format, raw_data[offset:offset+record_size])
-                points.append(record[:3])
-            points = np.array(points, dtype=np.float64)
-            
-            valid_mask = ~np.isnan(points[:, 2])
-            points = points[valid_mask]
-            
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points)
-            return pcd
-        
-        # 高效批量读取
-        data = np.fromfile(file_path, dtype=dtype, count=total_records)
-        points = np.column_stack([data['x'], data['y'], data['z']])
-        
-        # 过滤无效点
-        valid_mask = ~np.isnan(points[:, 2])
-        points = points[valid_mask].astype(np.float64)
-        
-        if np.sum(~valid_mask) > 0:
-            logger.warning(f"过滤NaN点: {np.sum(~valid_mask)} 个")
-        
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        
-        return pcd
-        
-    except Exception as e:
-        logger.error(f"加载二进制文件失败: {e}")
-        raise
+    print(f"批量处理 {total} 个文件...")
+    logger.info(f"批量处理: {total} 文件, 输出={output_dir}")
+    
+    for i, f in enumerate(input_files):
+        logger.info(f"[{i+1}/{total}] {f}")
+        try:
+            points = load_func(f)
+            out = os.path.join(output_dir, os.path.splitext(os.path.basename(f))[0] + '_depth.png')
+            generate_depth_map(points, resolution, out)
+            output_files.append(out)
+        except Exception as e:
+            logger.error(f"失败 {f}: {e}")
+    
+    print(f"完成: {len(output_files)}/{total}")
+    return output_files
 
 
 # ============================================================================
-# 降采样
-# ============================================================================
-
-def downsample(
-    pcd: o3d.geometry.PointCloud,
-    method: str = 'voxel',
-    voxel_size: float = 0.05,
-    every_k_points: int = 10,
-    random_ratio: float = 0.5
-) -> o3d.geometry.PointCloud:
-    """
-    点云降采样
-    
-    Args:
-        pcd: 输入点云
-        method: 降采样方法
-            'voxel'  - 体素下采样（推荐，均匀分布）
-            'uniform'- 均匀采样（每隔k个点取一个）
-            'random' - 随机采样
-        voxel_size: 体素大小（仅voxel方法）
-        every_k_points: 采样间隔（仅uniform方法）
-        random_ratio: 保留比例（仅random方法）
-    
-    Returns:
-        降采样后的点云
-    """
-    logger = get_logger()
-    original_count = len(pcd.points)
-    
-    if method == 'voxel':
-        pcd_down = pcd.voxel_down_sample(voxel_size=voxel_size)
-        logger.info(f"体素降采样: voxel_size={voxel_size}")
-    
-    elif method == 'uniform':
-        pcd_down = pcd.uniform_down_sample(every_k_points=every_k_points)
-        logger.info(f"均匀降采样: every_k_points={every_k_points}")
-    
-    elif method == 'random':
-        indices = np.random.choice(
-            original_count,
-            size=int(original_count * random_ratio),
-            replace=False
-        )
-        pcd_down = pcd.select_by_index(indices)
-        logger.info(f"随机降采样: ratio={random_ratio}")
-    
-    else:
-        logger.warning(f"未知方法 {method}，返回原点云")
-        return pcd
-    
-    new_count = len(pcd_down.points)
-    logger.info(f"降采样结果: {original_count} -> {new_count} ({100*new_count/original_count:.1f}%)")
-    
-    return pcd_down
-
-
-# ============================================================================
-# 可视化
-# ============================================================================
-
-class VisConfig:
-    """可视化配置"""
-    def __init__(
-        self,
-        window_name: str = "Point Cloud Viewer",
-        width: int = 1280,
-        height: int = 720,
-        background_color: Tuple[float, float, float] = (0.1, 0.1, 0.1),
-        point_size: float = 2.0,
-        show_coordinate_frame: bool = True,
-        coordinate_frame_size: float = 1.0
-    ):
-        self.window_name = window_name
-        self.width = width
-        self.height = height
-        self.background_color = background_color
-        self.point_size = point_size
-        self.show_coordinate_frame = show_coordinate_frame
-        self.coordinate_frame_size = coordinate_frame_size
-
-
-def visualize(
-    pcd: o3d.geometry.PointCloud,
-    config: Optional[VisConfig] = None,
-    color: Optional[Tuple[float, float, float]] = None
-):
-    """
-    可视化点云
-    
-    Args:
-        pcd: 点云对象
-        config: 可视化配置
-        color: 统一颜色(R,G,B)，范围[0,1]
-    """
-    logger = get_logger()
-    
-    if config is None:
-        config = VisConfig()
-    
-    # 如果点云无颜色，设置默认颜色
-    if not pcd.has_colors():
-        if color is None:
-            color = (0.6, 0.6, 0.6)
-        pcd.paint_uniform_color(color)
-    
-    geometries = [pcd]
-    
-    # 添加坐标系
-    if config.show_coordinate_frame:
-        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-            size=config.coordinate_frame_size
-        )
-        geometries.append(coord_frame)
-    
-    logger.info(f"启动可视化: {len(pcd.points)} 个点")
-    
-    o3d.visualization.draw_geometries(
-        geometries,
-        window_name=config.window_name,
-        width=config.width,
-        height=config.height,
-        point_show_normal=False
-    )
-
-
-def visualize_comparison(
-    pcd1: o3d.geometry.PointCloud,
-    pcd2: o3d.geometry.PointCloud,
-    color1: Tuple[float, float, float] = (1.0, 0.0, 0.0),
-    color2: Tuple[float, float, float] = (0.0, 1.0, 0.0),
-    config: Optional[VisConfig] = None
-):
-    """
-    对比可视化两个点云
-    
-    Args:
-        pcd1, pcd2: 待对比的点云
-        color1, color2: 对应颜色
-        config: 可视化配置
-    """
-    pcd1_vis = o3d.geometry.PointCloud(pcd1)
-    pcd2_vis = o3d.geometry.PointCloud(pcd2)
-    
-    pcd1_vis.paint_uniform_color(color1)
-    pcd2_vis.paint_uniform_color(color2)
-    
-    merged = pcd1_vis + pcd2_vis
-    visualize(merged, config)
-
-
-# ============================================================================
-# 工具函数
-# ============================================================================
-
-def log_pointcloud_stats(pcd: o3d.geometry.PointCloud):
-    """打印点云统计信息"""
-    logger = get_logger()
-    
-    if len(pcd.points) == 0:
-        logger.warning("点云为空")
-        return
-    
-    points = np.asarray(pcd.points)
-    
-    logger.info("坐标范围:")
-    logger.info(f"  X: [{points[:,0].min():.4f}, {points[:,0].max():.4f}]")
-    logger.info(f"  Y: [{points[:,1].min():.4f}, {points[:,1].max():.4f}]")
-    logger.info(f"  Z: [{points[:,2].min():.4f}, {points[:,2].max():.4f}]")
-
-
-def filter_by_range(
-    pcd: o3d.geometry.PointCloud,
-    x_range: Optional[Tuple[float, float]] = None,
-    y_range: Optional[Tuple[float, float]] = None,
-    z_range: Optional[Tuple[float, float]] = None
-) -> o3d.geometry.PointCloud:
-    """
-    按坐标范围过滤点云
-    
-    Args:
-        pcd: 输入点云
-        x_range, y_range, z_range: (min, max) 范围，None表示不限制
-    
-    Returns:
-        过滤后的点云
-    """
-    logger = get_logger()
-    points = np.asarray(pcd.points)
-    mask = np.ones(len(points), dtype=bool)
-    
-    if x_range is not None:
-        mask &= (points[:, 0] >= x_range[0]) & (points[:, 0] <= x_range[1])
-    if y_range is not None:
-        mask &= (points[:, 1] >= y_range[0]) & (points[:, 1] <= y_range[1])
-    if z_range is not None:
-        mask &= (points[:, 2] >= z_range[0]) & (points[:, 2] <= z_range[1])
-    
-    pcd_filtered = pcd.select_by_index(np.where(mask)[0])
-    logger.info(f"范围过滤: {len(points)} -> {len(pcd_filtered.points)}")
-    
-    return pcd_filtered
-
-
-def filter_outliers(
-    pcd: o3d.geometry.PointCloud,
-    method: str = 'statistical',
-    nb_neighbors: int = 20,
-    std_ratio: float = 2.0,
-    radius: float = 0.5,
-    min_points: int = 10
-) -> o3d.geometry.PointCloud:
-    """
-    去除离群点
-    
-    Args:
-        pcd: 输入点云
-        method: 方法 ('statistical' 或 'radius')
-        nb_neighbors: 邻居数量 (statistical)
-        std_ratio: 标准差阈值 (statistical)
-        radius: 搜索半径 (radius)
-        min_points: 最小邻居数 (radius)
-    
-    Returns:
-        去除离群点后的点云
-    """
-    logger = get_logger()
-    original_count = len(pcd.points)
-    
-    if method == 'statistical':
-        pcd_clean, _ = pcd.remove_statistical_outlier(
-            nb_neighbors=nb_neighbors,
-            std_ratio=std_ratio
-        )
-    elif method == 'radius':
-        pcd_clean, _ = pcd.remove_radius_outlier(
-            nb_points=min_points,
-            radius=radius
-        )
-    else:
-        logger.warning(f"未知方法 {method}")
-        return pcd
-    
-    new_count = len(pcd_clean.points)
-    logger.info(f"离群点过滤({method}): {original_count} -> {new_count}")
-    
-    return pcd_clean
-
-
-def transform_pointcloud(
-    pcd: o3d.geometry.PointCloud,
-    transformation: np.ndarray
-) -> o3d.geometry.PointCloud:
-    """
-    应用4x4变换矩阵
-    
-    Args:
-        pcd: 输入点云
-        transformation: 4x4变换矩阵
-    
-    Returns:
-        变换后的点云
-    """
-    if transformation.shape != (4, 4):
-        raise ValueError("变换矩阵必须是4x4")
-    
-    pcd_transformed = o3d.geometry.PointCloud(pcd)
-    pcd_transformed.transform(transformation)
-    
-    get_logger().info("已应用变换矩阵")
-    return pcd_transformed
-
-
-def merge_pointclouds(*pcds: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
-    """合并多个点云"""
-    logger = get_logger()
-    
-    if len(pcds) == 0:
-        return o3d.geometry.PointCloud()
-    
-    merged = o3d.geometry.PointCloud()
-    for pcd in pcds:
-        merged += pcd
-    
-    logger.info(f"合并 {len(pcds)} 个点云，共 {len(merged.points)} 个点")
-    return merged
-
-
-# ============================================================================
-# 保存
-# ============================================================================
-
-def save_pointcloud(
-    pcd: o3d.geometry.PointCloud,
-    output_path: str,
-    binary: bool = True
-) -> bool:
-    """
-    保存点云到文件
-    
-    Args:
-        pcd: 点云对象
-        output_path: 输出路径（支持.ply, .pcd, .xyz）
-        binary: 是否二进制格式（仅ply/pcd）
-    
-    Returns:
-        是否成功
-    """
-    logger = get_logger()
-    
-    try:
-        ext = Path(output_path).suffix.lower()
-        
-        if ext in ['.ply', '.pcd']:
-            success = o3d.io.write_point_cloud(
-                output_path, pcd,
-                write_ascii=not binary
-            )
-        elif ext in ['.xyz', '.txt']:
-            np.savetxt(output_path, np.asarray(pcd.points), fmt='%.6f')
-            success = True
-        else:
-            logger.error(f"不支持的输出格式: {ext}")
-            return False
-        
-        if success:
-            logger.info(f"已保存: {output_path} ({len(pcd.points)} 点)")
-        else:
-            logger.error(f"保存失败: {output_path}")
-        
-        return success
-        
-    except Exception as e:
-        logger.error(f"保存出错: {e}")
-        return False
-
-
-# ============================================================================
-# 使用示例
+# 示例
 # ============================================================================
 
 if __name__ == "__main__":
-    # 初始化日志
-    logger = setup_logger(log_dir="./logs", console_output=True)
+    logger = setup_logger(log_dir="./logs", console_output=False)
     
-    # 示例：加载点云
-    # pcd = load_pointcloud("example.ply")
-    # pcd = load_pointcloud("data.txt", file_format='txt_bin', binary_record_format='3fi')
-    # pcd = load_pointcloud("points.xyz", skip_header=1)
+    # 测试数据
+    np.random.seed(42)
+    n = 10000
+    x = np.random.uniform(0, 100, n)
+    y = np.random.uniform(0, 100, n)
+    z = 10 * np.exp(-((x-50)**2 + (y-50)**2) / 500) + np.random.normal(0, 0.5, n)
     
-    # 示例：降采样
-    # pcd_down = downsample(pcd, method='voxel', voxel_size=0.02)
+    depth_map, colored = generate_depth_map(np.column_stack([x, y, z]), 2.0, "./test_depth.png")
+    compute_depth_statistics(depth_map)
     
-    # 示例：过滤
-    # pcd_clean = filter_outliers(pcd, method='statistical')
-    # pcd_roi = filter_by_range(pcd, z_range=(0, 10))
-    
-    # 示例：可视化
-    # visualize(pcd)
-    # visualize(pcd, VisConfig(point_size=3.0, background_color=(1,1,1)))
-    
-    # 示例：保存
-    # save_pointcloud(pcd, "output.ply", binary=True)
-    
-    print("点云工具模块已加载，使用 help(load_pointcloud) 查看帮助")
+    print("完成，详情见 ./logs/")
