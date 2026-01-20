@@ -5,7 +5,8 @@
 ```
 Size_measuring_tools/
 ├── 点云预处理/
-│   └── PointCloud_DataLoader.py  # 核心点云处理模块
+│   ├── PointCloud_DataLoader.py  # 核心点云处理模块
+│   └── Depth_map_renderin.py     # 深度图渲染模块
 └── README.md                     # 项目说明文档
 ```
 
@@ -29,7 +30,18 @@ Size_measuring_tools/
 | `merge_pointclouds()` | 合并多个点云 |
 | `save_pointcloud()` | 保存点云到文件 |
 
+### Depth_map_renderin.py
+
+| 函数名 | 功能描述 |
+|-------|---------|
+| `generate_depth_map()` | 从点云数据生成深度图，支持遮挡处理 |
+| `otsu_threshold_improved()` | 改进的Otsu阈值算法，用于自动分割前景背景 |
+| `depth_map_to_pointcloud()` | 将深度图逆变换回点云格式 |
+| `compute_depth_statistics()` | 计算深度图的统计信息 |
+| `batch_generate_depth_maps()` | 批量生成多个点云的深度图 |
+
 ## 依赖项
 - Python 3.6+
 - NumPy
 - Open3D
+- OpenCV (cv2)
