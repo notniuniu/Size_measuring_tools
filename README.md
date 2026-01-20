@@ -6,7 +6,8 @@
 Size_measuring_tools/
 ├── 点云预处理/
 │   ├── PointCloud_DataLoader.py  # 核心点云处理模块
-│   └── Depth_map_renderin.py     # 深度图渲染模块
+│   ├── Depth_map_renderin.py     # 深度图渲染模块
+│   └── ICP_registration.py       # 点云配准模块
 └── README.md                     # 项目说明文档
 ```
 
@@ -39,6 +40,21 @@ Size_measuring_tools/
 | `depth_map_to_pointcloud()` | 将深度图逆变换回点云格式 |
 | `compute_depth_statistics()` | 计算深度图的统计信息 |
 | `batch_generate_depth_maps()` | 批量生成多个点云的深度图 |
+
+### ICP_registration.py
+
+| 函数名 | 功能描述 |
+|-------|---------|
+| `setup_logger()` | 配置日志记录器 |
+| `get_logger()` | 获取全局日志器 |
+| `set_logger()` | 设置自定义日志器 |
+| `icp_registration()` | ICP点云配准，实现核心配准算法 |
+| `extract_overlap_region()` | 提取点云重叠区域（基于Z轴阈值分割） |
+| `batch_registration()` | 批量点云配准（源与目标一一对应） |
+| `evaluate_registration()` | 评估配准质量 |
+| `create_transform_matrix()` | 创建4×4变换矩阵 |
+| `decompose_transform()` | 分解变换矩阵为旋转和平移 |
+| `merge_registered_pointclouds()` | 合并配准后的点云 |
 
 ## 依赖项
 - Python 3.6+
