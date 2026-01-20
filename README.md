@@ -21,9 +21,6 @@ Size_measuring_tools/
 
 | 函数名 | 功能描述 |
 |-------|---------|
-| `setup_logger()` | 配置日志记录器 |
-| `get_logger()` | 获取全局日志器 |
-| `set_logger()` | 设置自定义日志器 |
 | `load_pointcloud()` | 统一点云加载接口，自动识别格式 |
 | `downsample()` | 点云降采样（支持体素、均匀、随机三种方法） |
 | `visualize()` | 可视化点云 |
@@ -49,9 +46,6 @@ Size_measuring_tools/
 
 | 函数名 | 功能描述 |
 |-------|---------|
-| `setup_logger()` | 配置日志记录器 |
-| `get_logger()` | 获取全局日志器 |
-| `set_logger()` | 设置自定义日志器 |
 | `icp_registration()` | ICP点云配准，实现核心配准算法 |
 | `extract_overlap_region()` | 提取点云重叠区域（基于Z轴阈值分割） |
 | `batch_registration()` | 批量点云配准（源与目标一一对应） |
@@ -64,9 +58,6 @@ Size_measuring_tools/
 
 | 函数名 | 功能描述 |
 |-------|---------|
-| `setup_logger()` | 配置日志记录器 |
-| `get_logger()` | 获取全局日志器 |
-| `set_logger()` | 设置自定义日志器 |
 | `compute_bounding_box()` | 计算点云包围盒信息 |
 | `estimate_point_density()` | 估计点云密度（点数/体积） |
 | `compute_adaptive_voxel_size()` | 根据点数规模自适应计算体素尺寸 |
@@ -81,9 +72,6 @@ Size_measuring_tools/
 
 | 函数名 | 功能描述 |
 |-------|---------|
-| `setup_logger()` | 配置日志记录器 |
-| `get_logger()` | 获取全局日志器 |
-| `set_logger()` | 设置自定义日志器 |
 | `dbscan_denoise()` | 基于DBSCAN密度聚类的点云去噪 |
 | `statistical_denoise()` | 统计滤波去噪 |
 | `radius_denoise()` | 半径滤波去噪 |
@@ -96,9 +84,6 @@ Size_measuring_tools/
 
 | 函数名 | 功能描述 |
 |-------|---------|
-| `setup_logger()` | 配置日志记录器 |
-| `get_logger()` | 获取全局日志器 |
-| `set_logger()` | 设置自定义日志器 |
 | `compute_bounding_box()` | 计算点云包围盒 |
 | `get_reference_point()` | 根据比例参考点获取实际空间位置 |
 | `get_local_region()` | 获取局部搜索区域 |
