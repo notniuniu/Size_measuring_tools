@@ -10,6 +10,8 @@ Size_measuring_tools/
 │   ├── ICP_registration.py       # 点云配准模块
 │   ├── adaptive_downsample.py    # 自适应降采样模块
 │   └── pointcloud_denoise.py     # 点云去噪模块
+├── 点云分割/
+│   └── extract_plane.py          # 平面提取模块
 └── README.md                     # 项目说明文档
 ```
 
@@ -90,8 +92,26 @@ Size_measuring_tools/
 | `batch_denoise()` | 批量点云去噪 |
 | `evaluate_denoise_quality()` | 评估去噪质量 |
 
+### extract_plane.py
+
+| 函数名 | 功能描述 |
+|-------|---------|
+| `setup_logger()` | 配置日志记录器 |
+| `get_logger()` | 获取全局日志器 |
+| `set_logger()` | 设置自定义日志器 |
+| `compute_bounding_box()` | 计算点云包围盒 |
+| `get_reference_point()` | 根据比例参考点获取实际空间位置 |
+| `get_local_region()` | 获取局部搜索区域 |
+| `compute_plane_from_points()` | 从三个点计算平面方程 |
+| `get_point_plane_distance()` | 计算点到平面的距离 |
+| `check_normal_consistency()` | 检查两个法向量是否一致 |
+| `ransac_plane_extraction()` | 使用RANSAC方法提取平面 |
+| `region_growing_plane_extraction()` | 使用区域增长方法提取平面 |
+| `extract_plane()` | 面提取主函数 |
+
 ## 依赖项
 - Python 3.6+
 - NumPy
 - Open3D
 - OpenCV (cv2)
+- SciPy
